@@ -1,0 +1,28 @@
+#!/sbin/runscript
+# Copyright 1999-2009 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Header: $
+
+PIDFILE=/var/run/bluepulse.pid
+LOGFILE=/var/log/bluepulse.log
+DAEMON=/usr/local/bin/bluepulse
+
+depend() {
+	need pulseaudio
+}
+
+start() {
+	ebegin "Starting BluePulse"
+	start-stop-daemon --start --quiet --pidfile "$PIDFILE" \
+		--background --make-pidfile --stdout "$LOGFILE" \
+		--stderr "$LOGFILE" --exec $DAEMON
+	eend $?
+}
+
+stop() {
+
+	ebegin "Stopping BluePulse"
+	start-stop-daemon --stop --quiet --pidfile "$PIDFILE" \
+		--exec $DAEMON
+	eend $?
+}

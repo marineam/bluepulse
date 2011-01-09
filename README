@@ -1,0 +1,18 @@
+A simple daemon to link up A2DP sources in PulseAudio.
+
+This really should have been implemented as a PulseAudio module but that
+would have inspired implementing it "correctly" as a generic system for
+configuring streams like this. So meh, I want something that works. :-P
+
+Bluez >= 4.82 works for me, 4.69 had a bug that breaks this.
+
+Also this needs to be in /etc/bluetooth/audio.conf:
+    [General]
+
+    Enable=Source
+
+
+Copyright 2010 Michael Marineau <mike@marineau.org>
+Licensed under the GPL v2 (licenses/GPL-2.0)
+
+Included CCAN modules licensed under LGPL v2.1 (licenses/LGPL-2.1)
