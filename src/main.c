@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <unistd.h>
 #include <assert.h>
 #include <string.h>
 #include <signal.h>
@@ -7,6 +8,9 @@
 
 /* Alias this because it is used constantly */
 #define pao(o) pa_operation_unref(o)
+
+/* Used to identify duplicate processes */
+#define APPLICATION_NAME "BluePulse"
 
 struct source {
     uint32_t index;
@@ -53,16 +57,18 @@ static void finish_unload(pa_context *c, int success, void *data)
 static void source_info(pa_context *c,
         const pa_source_info *i, int eol, void *data)
 {
-    const void *value;
-    size_t length;
+    const char *proto;
+    struct source *s;
+    char *arg;
 
     if (eol)
         return;
 
-    if (pa_proplist_get(i->proplist, "bluetooth.protocol", &value, &length))
+    proto = pa_proplist_gets(i->proplist, "bluetooth.protocol");
+    if (proto == NULL)
         return;
 
-    if (strcmp("a2dp_source", (char*)value))
+    if (strcmp("a2dp_source", proto))
         return;
 
     if (get_source(i->index) != NULL)
@@ -70,9 +76,8 @@ static void source_info(pa_context *c,
 
     fprintf(stderr, "New A2DP Source: %s\n", i->description);
 
-    struct source *s = malloc(sizeof(*s));
+    s = malloc(sizeof(*s));
     assert(s);
-    char *arg;
     assert(asprintf(&arg, "source=%s", i->name) > 0);
 
     s->index = i->index;
@@ -84,8 +89,6 @@ static void source_info(pa_context *c,
 static void source_cleanup(pa_context *c, struct source *s)
 {
     fprintf(stderr, "Removed A2DP Source: %s\n", s->description);
-
-
 
     list_del(&s->list);
     pao(pa_context_unload_module(c, s->loopback, finish_unload, s));
@@ -115,6 +118,35 @@ static void context_event(pa_context *c,
     }
 }
 
+static void client_info(pa_context *c,
+        const pa_client_info *i, int eol, void *data)
+{
+    const char *name, *pid;
+
+    if (eol) {
+        /* Conflicting client check done, start the real work! */
+        pao(pa_context_subscribe(c, PA_SUBSCRIPTION_MASK_SOURCE, NULL, NULL));
+        pao(pa_context_get_source_info_list(c, source_info, NULL));
+        return;
+    }
+
+    name = pa_proplist_gets(i->proplist, PA_PROP_APPLICATION_NAME);
+    pid = pa_proplist_gets(i->proplist, PA_PROP_APPLICATION_PROCESS_ID);
+    if (name == NULL || pid == NULL)
+        return;
+
+    if (atoi(pid) == getpid())
+        return;
+
+    if (strcmp(name, APPLICATION_NAME))
+        return;
+
+    /* Uh oh... two copies of this daemon are connected! */
+    fprintf(stderr, "ERROR: Another instance of %s is already connected.\n",
+            APPLICATION_NAME);
+    api->quit(api, 1);
+}
+
 static void context_change(pa_context *c, void *data)
 {
     switch (pa_context_get_state(c)) {
@@ -125,9 +157,7 @@ static void context_change(pa_context *c, void *data)
             break;
 
         case PA_CONTEXT_READY:
-            pao(pa_context_subscribe(c,
-                        PA_SUBSCRIPTION_MASK_SOURCE, NULL, NULL));
-            pao(pa_context_get_source_info_list(c, source_info, NULL));
+            pao(pa_context_get_client_info_list(c, client_info, NULL));
             break;
 
         case PA_CONTEXT_TERMINATED:
@@ -164,13 +194,11 @@ int main(int argc, char * argv[])
     pa_context *context = NULL;
     int ret = 1;
 
-    list_head_init(&sources);
-
     /* Start up the PulseAudio connection */
     mainloop = pa_mainloop_new();
     assert(mainloop);
     api = pa_mainloop_get_api(mainloop);
-    context = pa_context_new(api, argv[0]);
+    context = pa_context_new(api, APPLICATION_NAME);
     assert(context);
 
     /* Register some signal handlers */
@@ -193,6 +221,7 @@ finish:
     pa_signal_done();
     pa_context_unref(context);
     pa_mainloop_free(mainloop);
+    api = NULL;
 
     return ret;
 }
