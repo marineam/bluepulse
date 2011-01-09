@@ -1,3 +1,4 @@
+#include <time.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <assert.h>
@@ -12,6 +13,10 @@
 /* Used to identify duplicate processes */
 #define APPLICATION_NAME "BluePulse"
 
+static void signal_exit(pa_mainloop_api *api, pa_signal_event *e,
+                        int sig, void *data);
+static int context_setup();
+
 struct source {
     uint32_t index;
     uint32_t loopback;
@@ -20,6 +25,7 @@ struct source {
 };
 
 static pa_mainloop_api *api;
+static pa_context *context;
 static int stopping = 0;
 static LIST_HEAD(sources);
 
@@ -35,6 +41,12 @@ static struct source* get_source(uint32_t index)
     return NULL;
 }
 
+static void free_source(struct source* s)
+{
+    free(s->description);
+    free(s);
+}
+
 static void finish_load(pa_context *c, uint32_t idx, void *data)
 {
     struct source *s = (struct source*)data;
@@ -47,8 +59,7 @@ static void finish_unload(pa_context *c, int success, void *data)
 {
     struct source *s = (struct source*)data;
 
-    free(s->description);
-    free(s);
+    free_source(s);
 
     if (stopping && --stopping <= 0)
         api->quit(api, 0);
@@ -149,41 +160,86 @@ static void client_info(pa_context *c,
 
 static void context_change(pa_context *c, void *data)
 {
+    struct source *s, *n;
+
     switch (pa_context_get_state(c)) {
         case PA_CONTEXT_CONNECTING:
         case PA_CONTEXT_AUTHORIZING:
         case PA_CONTEXT_UNCONNECTED:
         case PA_CONTEXT_SETTING_NAME:
+        case PA_CONTEXT_TERMINATED:
             break;
 
         case PA_CONTEXT_READY:
+            fprintf(stderr, "Connected\n");
             pao(pa_context_get_client_info_list(c, client_info, NULL));
-            break;
-
-        case PA_CONTEXT_TERMINATED:
-            fprintf(stderr, "Unexpected connection close.\n");
-            api->quit(api, 1);
             break;
 
         case PA_CONTEXT_FAILED:
             fprintf(stderr, "Connection failure: %s\n",
                     pa_strerror(pa_context_errno(c)));
-            api->quit(api, 1);
+
+            /* Not sure what to do about the source list as it is
+             * invalid if we reconnect to a fresh process but is valid
+             * if we get to reconnect to the same old one. */
+            list_for_each_safe(&sources, s, n, list) {
+                list_del(&s->list);
+                free_source(s);
+            }
+
+            /* Attempt to reconnect */
+            if (context != c || context_setup(c))
+                api->quit(api, 1);
             break;
     }
 }
 
+static int context_setup() {
+    time_t timeout = time(NULL) + 30;
+
+    if (context)
+        pa_context_unref(context);
+
+    context = pa_context_new(api, APPLICATION_NAME);
+    assert(context);
+
+    pa_context_set_state_callback(context, context_change, NULL);
+    pa_context_set_subscribe_callback(context, context_event, NULL);
+
+    do {
+        if (pa_context_connect(context, NULL, 0, NULL)) {
+            fprintf(stderr, "Connection failure: %s\n",
+                pa_strerror(pa_context_errno(context)));
+            sleep(1);
+        }
+        else
+            return 0;
+    } while (time(NULL) <= timeout);
+
+    pa_context_unref(context);
+    context = NULL;
+
+    return 1;
+}
+
 static void signal_exit(pa_mainloop_api *api, pa_signal_event *e,
         int sig, void *data) {
-    pa_context *c = (pa_context*)data;
     struct source *s, *n;
 
     if (list_empty(&sources))
         api->quit(api, 0);
-    else {
+    else if (context) {
+        pao(pa_context_subscribe(context,
+                    PA_SUBSCRIPTION_MASK_NULL, NULL, NULL));
         list_for_each_safe(&sources, s, n, list) {
             stopping++;
-            source_cleanup(c, s);
+            source_cleanup(context, s);
+        }
+    }
+    else {
+        list_for_each_safe(&sources, s, n, list) {
+            list_del(&s->list);
+            free_source(s);
         }
     }
 }
@@ -191,35 +247,28 @@ static void signal_exit(pa_mainloop_api *api, pa_signal_event *e,
 int main(int argc, char * argv[])
 {
     pa_mainloop *mainloop = NULL;
-    pa_context *context = NULL;
     int ret = 1;
 
     /* Start up the PulseAudio connection */
     mainloop = pa_mainloop_new();
     assert(mainloop);
     api = pa_mainloop_get_api(mainloop);
-    context = pa_context_new(api, APPLICATION_NAME);
-    assert(context);
 
     /* Register some signal handlers */
     pa_signal_init(api);
-    pa_signal_new(SIGINT, signal_exit, context);
-    pa_signal_new(SIGTERM, signal_exit, context);
+    pa_signal_new(SIGINT, signal_exit, NULL);
+    pa_signal_new(SIGTERM, signal_exit, NULL);
 
-    pa_context_set_state_callback(context, context_change, NULL);
-    pa_context_set_subscribe_callback(context, context_event, NULL);
-
-    if (pa_context_connect(context, NULL, 0, NULL)) {
-        fprintf(stderr, "Connection failure: %s\n",
-                pa_strerror(pa_context_errno(context)));
+    if (context_setup())
         goto finish;
-    }
 
     pa_mainloop_run(mainloop, &ret);
 
 finish:
     pa_signal_done();
-    pa_context_unref(context);
+    if (context)
+        pa_context_disconnect(context);
+        pa_context_unref(context);
     pa_mainloop_free(mainloop);
     api = NULL;
 
