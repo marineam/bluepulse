@@ -13,8 +13,15 @@
 /* Used to identify duplicate processes */
 #define APPLICATION_NAME "BluePulse"
 
-static void signal_exit(pa_mainloop_api *api, pa_signal_event *e,
-                        int sig, void *data);
+/* Arguments for PulseAudio's loopback module.
+ * A high latency is required to make resampling less aggressive. The
+ * loopback module manages latency by changing the playback sample Hz
+ * which causes pitch bending. Hopefully the larger the buffer the
+ * less this will happen, it is pretty damn annoying.
+ * (future note: try adjust_time when that arg starts working)
+ */
+#define MODULE_ARGS "latency_msec=1500"
+
 static int context_setup();
 
 struct source {
@@ -89,7 +96,7 @@ static void source_info(pa_context *c,
 
     s = malloc(sizeof(*s));
     assert(s);
-    assert(asprintf(&arg, "source=%s", i->name) > 0);
+    assert(asprintf(&arg, "source=%s %s", i->name, MODULE_ARGS) > 0);
 
     s->index = i->index;
     s->description = strdup(i->description);
