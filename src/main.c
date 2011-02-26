@@ -13,71 +13,110 @@
 /* Used to identify duplicate processes */
 #define APPLICATION_NAME "BluePulse"
 
-/* Arguments for PulseAudio's loopback module.
- * A high latency is required to make resampling less aggressive. The
- * loopback module manages latency by changing the playback sample Hz
- * which causes pitch bending. Hopefully the larger the buffer the
- * less this will happen, it is pretty damn annoying.
- * (future note: try adjust_time when that arg starts working)
- */
-#define MODULE_ARGS "latency_msec=1500"
-
 static int context_setup();
 
-struct source {
-    uint32_t index;
-    uint32_t loopback;
+struct loopback {
+    uint32_t source_idx;
+    pa_stream *source;
+    pa_stream *sink;
     char *description;
     struct list_node list;
 };
 
 static pa_mainloop_api *api;
 static pa_context *context;
-static int stopping = 0;
-static LIST_HEAD(sources);
+static LIST_HEAD(loops);
 
-static struct source* get_source(uint32_t index)
+static struct loopback* loopback_get(uint32_t source_idx)
 {
-    struct source *s;
+    struct loopback *l;
 
-    list_for_each(&sources, s, list) {
-        if (s->index == index)
-            return s;
+    list_for_each(&loops, l, list) {
+        if (l->source_idx == source_idx)
+            return l;
     }
 
     return NULL;
 }
 
-static void free_source(struct source* s)
+static void loopback_stop(struct loopback* l)
 {
-    free(s->description);
-    free(s);
+    fprintf(stderr, "Removed A2DP Source: %s\n", l->description);
+    list_del(&l->list);
+    pa_stream_disconnect(l->source);
+    pa_stream_disconnect(l->sink);
+    pa_stream_unref(l->source);
+    pa_stream_unref(l->sink);
+    free(l->description);
+    free(l);
 }
 
-static void finish_load(pa_context *c, uint32_t idx, void *data)
+static void loopback_stop_all()
 {
-    struct source *s = (struct source*)data;
+    struct loopback *l, *n;
 
-    s->loopback = idx;
-    list_add(&sources, &s->list);
+    list_for_each_safe(&loops, l, n, list)
+        loopback_stop(l);
 }
 
-static void finish_unload(pa_context *c, int success, void *data)
+static void loopback_read(pa_stream *s, size_t rlen, void *data)
 {
-    struct source *s = (struct source*)data;
+    struct loopback *l = (struct loopback*)data;
+    const void *buffer;
 
-    free_source(s);
+    assert(s == l->source);
+    pa_stream_peek(s, &buffer, &rlen);
+    assert(buffer && rlen);
+    pa_stream_write(l->sink, buffer, rlen, NULL, 0, 0);
+    pa_stream_drop(s);
+}
 
-    if (stopping && --stopping <= 0)
-        api->quit(api, 0);
+static void loopback_state(pa_stream *s, void *data)
+{
+    switch (pa_stream_get_state(s)) {
+        case PA_STREAM_CREATING:
+        case PA_STREAM_UNCONNECTED:
+        case PA_STREAM_TERMINATED:
+        case PA_STREAM_READY:
+            break;
+
+        case PA_STREAM_FAILED:
+            fprintf(stderr, "Stream failure: %s\n",
+                    pa_strerror(pa_context_errno(context)));
+            loopback_stop((struct loopback*)data);
+            break;
+    }
+}
+
+static void loopback_start(pa_context *c, const pa_source_info *i)
+{
+    struct loopback *l;
+
+    assert(!loopback_get(i->index));
+    fprintf(stderr, "New A2DP Source: %s\n", i->description);
+
+    l = malloc(sizeof(*l));
+    l->source_idx = i->index;
+    l->description = strdup(i->description);
+
+    /* source stream */
+    l->source = pa_stream_new(c, l->description, &i->sample_spec, NULL);
+    pa_stream_set_state_callback(l->source, loopback_state, l);
+    pa_stream_set_read_callback(l->source, loopback_read, l);
+    pa_stream_connect_record(l->source, i->name, NULL, PA_STREAM_DONT_MOVE);
+
+    /* sink stream */
+    l->sink = pa_stream_new(c, l->description, &i->sample_spec, NULL);
+    pa_stream_set_state_callback(l->sink, loopback_state, l);
+    pa_stream_connect_playback(l->sink, NULL, NULL, 0, NULL, NULL);
+
+    list_add(&loops, &l->list);
 }
 
 static void source_info(pa_context *c,
         const pa_source_info *i, int eol, void *data)
 {
     const char *proto;
-    struct source *s;
-    char *arg;
 
     if (eol)
         return;
@@ -89,27 +128,10 @@ static void source_info(pa_context *c,
     if (strcmp("a2dp_source", proto))
         return;
 
-    if (get_source(i->index) != NULL)
+    if (loopback_get(i->index) != NULL)
         return;
 
-    fprintf(stderr, "New A2DP Source: %s\n", i->description);
-
-    s = malloc(sizeof(*s));
-    assert(s);
-    assert(asprintf(&arg, "source=%s %s", i->name, MODULE_ARGS) > 0);
-
-    s->index = i->index;
-    s->description = strdup(i->description);
-    pao(pa_context_load_module(c, "module-loopback", arg, finish_load, s));
-    free(arg);
-}
-
-static void source_cleanup(pa_context *c, struct source *s)
-{
-    fprintf(stderr, "Removed A2DP Source: %s\n", s->description);
-
-    list_del(&s->list);
-    pao(pa_context_unload_module(c, s->loopback, finish_unload, s));
+    loopback_start(c, i);
 }
 
 static void context_event(pa_context *c,
@@ -125,9 +147,9 @@ static void context_event(pa_context *c,
                             idx, source_info, NULL));
             }
             else if (type == PA_SUBSCRIPTION_EVENT_REMOVE) {
-                struct source *s = get_source(idx);
-                if (s != NULL)
-                    source_cleanup(c, s);
+                struct loopback *l = loopback_get(idx);
+                if (l != NULL)
+                    loopback_stop(l);
             }
             break;
 
@@ -167,8 +189,6 @@ static void client_info(pa_context *c,
 
 static void context_change(pa_context *c, void *data)
 {
-    struct source *s, *n;
-
     switch (pa_context_get_state(c)) {
         case PA_CONTEXT_CONNECTING:
         case PA_CONTEXT_AUTHORIZING:
@@ -185,14 +205,7 @@ static void context_change(pa_context *c, void *data)
         case PA_CONTEXT_FAILED:
             fprintf(stderr, "Connection failure: %s\n",
                     pa_strerror(pa_context_errno(c)));
-
-            /* Not sure what to do about the source list as it is
-             * invalid if we reconnect to a fresh process but is valid
-             * if we get to reconnect to the same old one. */
-            list_for_each_safe(&sources, s, n, list) {
-                list_del(&s->list);
-                free_source(s);
-            }
+            loopback_stop_all();
 
             /* Attempt to reconnect */
             if (context != c || context_setup(c))
@@ -230,25 +243,14 @@ static int context_setup() {
 }
 
 static void signal_exit(pa_mainloop_api *api, pa_signal_event *e,
-        int sig, void *data) {
-    struct source *s, *n;
-
-    if (list_empty(&sources))
-        api->quit(api, 0);
-    else if (context) {
+        int sig, void *data)
+{
+    if (context) {
         pao(pa_context_subscribe(context,
                     PA_SUBSCRIPTION_MASK_NULL, NULL, NULL));
-        list_for_each_safe(&sources, s, n, list) {
-            stopping++;
-            source_cleanup(context, s);
-        }
+        loopback_stop_all();
     }
-    else {
-        list_for_each_safe(&sources, s, n, list) {
-            list_del(&s->list);
-            free_source(s);
-        }
-    }
+    api->quit(api, 0);
 }
 
 int main(int argc, char * argv[])
