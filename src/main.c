@@ -91,6 +91,7 @@ static void loopback_state(pa_stream *s, void *data)
 static void loopback_start(pa_context *c, const pa_source_info *i)
 {
     struct loopback *l;
+    pa_buffer_attr max_latency = {-1, -1, -1, -1, -1};
 
     assert(!loopback_get(i->index));
     fprintf(stderr, "New A2DP Source: %s\n", i->description);
@@ -108,7 +109,8 @@ static void loopback_start(pa_context *c, const pa_source_info *i)
     /* sink stream */
     l->sink = pa_stream_new(c, l->description, &i->sample_spec, NULL);
     pa_stream_set_state_callback(l->sink, loopback_state, l);
-    pa_stream_connect_playback(l->sink, NULL, NULL, 0, NULL, NULL);
+    pa_stream_connect_playback(l->sink, NULL, &max_latency,
+            PA_STREAM_ADJUST_LATENCY, NULL, NULL);
 
     list_add(&loops, &l->list);
 }
