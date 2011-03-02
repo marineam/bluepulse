@@ -71,7 +71,10 @@ static void loopback_state(pa_stream *s, void *data)
         case PA_STREAM_CREATING:
         case PA_STREAM_UNCONNECTED:
         case PA_STREAM_TERMINATED:
+            break;
+
         case PA_STREAM_READY:
+            pao(pa_stream_flush(s, NULL, NULL));
             break;
 
         case PA_STREAM_FAILED:
