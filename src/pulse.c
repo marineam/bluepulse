@@ -10,14 +10,6 @@
 /* Alias this because it is used constantly */
 #define pao(o) pa_operation_unref(o)
 
-struct loopback {
-    uint32_t source_idx;
-    pa_stream *source;
-    pa_stream *sink;
-    char *description;
-    struct list_node list;
-};
-
 static pa_context *context;
 static LIST_HEAD(loops);
 
@@ -42,6 +34,8 @@ static void loopback_stop(struct loopback* l)
     pa_stream_unref(l->source);
     pa_stream_unref(l->sink);
     free(l->description);
+    free(l->device_path);
+    blue_free(l);
     free(l);
 }
 
@@ -94,8 +88,10 @@ static void loopback_start(pa_context *c, const pa_source_info *i)
     g_message("New A2DP Source: %s", i->description);
 
     l = malloc(sizeof(*l));
+    memset(l, 0, sizeof(*l));
     l->source_idx = i->index;
     l->description = strdup(i->description);
+    l->device_path = strdup(pa_proplist_gets(i->proplist, "bluez.path"));
 
     /* source stream */
     l->source = pa_stream_new(c, l->description, &i->sample_spec, NULL);
@@ -108,6 +104,8 @@ static void loopback_start(pa_context *c, const pa_source_info *i)
     pa_stream_set_state_callback(l->sink, loopback_state, l);
     pa_stream_connect_playback(l->sink, NULL, &max_latency,
             PA_STREAM_ADJUST_LATENCY, NULL, NULL);
+
+    blue_connect(l);
 
     list_add(&loops, &l->list);
 }

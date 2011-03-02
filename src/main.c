@@ -1,5 +1,6 @@
 #include <glib.h>
 #include <signal.h>
+#include <glib-object.h>
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
@@ -26,6 +27,8 @@ static void signal_quit(pa_mainloop_api *api,
 
 int main(int argc, char *argv[])
 {
+    g_type_init();
+
     mainloop = g_main_loop_new(NULL, FALSE);
     pulse_mainloop = pa_glib_mainloop_new(NULL);
     pulse_api = pa_glib_mainloop_get_api(pulse_mainloop);

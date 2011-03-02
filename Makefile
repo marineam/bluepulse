@@ -1,5 +1,5 @@
 CC = gcc
-PKGLIB = libpulse libpulse-mainloop-glib glib-2.0
+PKGLIB = libpulse libpulse-mainloop-glib glib-2.0 gio-unix-2.0
 CFLAGS = -g -O2 -Wall -std=gnu99 -I. -D_GNU_SOURCE
 CFLAGS += $(shell pkg-config $(PKGLIB) --cflags)
 LIBS = $(shell pkg-config $(PKGLIB) --libs)
