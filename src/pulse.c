@@ -93,6 +93,9 @@ static void loopback_start(pa_context *c, const pa_source_info *i)
     g_assert(!loopback_get(i->index));
     g_message("New A2DP Source: %s", i->description);
 
+    /* make sure the source is not muted */
+    pao(pa_context_set_source_mute_by_index(c, i->index, 0, NULL, NULL));
+
     l = malloc(sizeof(*l));
     l->source_idx = i->index;
     l->description = strdup(i->description);
